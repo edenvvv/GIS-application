@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Collaborative GIS Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <style>
+        /* Full screen setup */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        #map {
+            width: 100vw;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+        }
+        #active-users {
+            position: absolute;
+            top: 12px;
+            left: 45px;
+            background: white;
+            padding: 5px;
+            font-size: 16px;
+            z-index: 9999;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="active-users">Active Users: 0</div> <!-- Display active users -->
+
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+    <script>
+        const map = L.map('map').setView([32.0853, 34.7818], 13);
+
+        // Base layers
+        const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        const satelliteLayer = L.tileLayer.wms('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            layers: 'ta',
+            format: 'image/png',
+            transparent: true,
+            version: '1.3.0',
+            crs: L.CRS.EPSG4326,
+            attribution: 'Tiles © Esri'
+        });
+
+        // Layer control
+        const baseLayers = {
+            "OpenStreetMap": osmLayer,
+            "Satellite": satelliteLayer
+        };
+        L.control.layers(baseLayers).addTo(map);
+
+        // WebSocket connection for real-time updates
+        const socket = io("http://localhost:5678");
+
+        // Initialize Leaflet Draw
+        const drawnItems = new L.FeatureGroup();
+        map.addLayer(drawnItems);
+
+        const drawControl = new L.Control.Draw({
+            edit: {
+                featureGroup: drawnItems
+            },
+            draw: {
+                polygon: true,
+                polyline: false,
+                rectangle: false,
+                circle: false,
+                marker: false
+            }
+        });
+        map.addControl(drawControl);
+
+        // Handle real-time polygon drawing
+        map.on(L.Draw.Event.CREATED, function(event) {
+            const layer = event.layer;
+            drawnItems.addLayer(layer);
+
+            // Get the polygon coordinates and calculate area
+            const coordinates = layer.getLatLngs()[0].map(latlng => [latlng.lat, latlng.lng]);
+            const area = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]) / 1_000_000;  // Convert to km^2
+
+            // Display the area on the map
+            layer.bindPopup(`Area: ${area.toFixed(2)} km²`).openPopup();
+
+            // Broadcast the polygon and area to other users
+            socket.emit("draw_polygon", { coordinates: coordinates, area: area });
+        });
+
+        // Receive and render other users' polygons
+        socket.on("draw_polygon", function(data) {
+            const layer = L.polygon(data.coordinates).addTo(drawnItems);
+            layer.bindPopup(`Area: ${data.area.toFixed(2)} km²`);
+        });
+
+        // Display active users on the map
+        socket.on("user_connected", function(data) {
+            updateActiveUsers(data.active_users);
+        });
+
+        socket.on("user_disconnected", function(data) {
+            updateActiveUsers(data.active_users);
+        });
+
+        function updateActiveUsers(activeUsers) {
+            document.getElementById("active-users").innerText = `Active Users: ${activeUsers}`;
+        }
+
+        // When the page loads, notify the server of a new user
+        socket.emit("user_connected");
+        window.addEventListener("beforeunload", () => {
+            socket.emit("user_disconnected");
+        });
+
+        // Maintain drawn items during layer switching
+        map.on('baselayerchange', function(e) {
+            drawnItems.eachLayer(function(layer) {
+                map.removeLayer(layer);
+                map.addLayer(layer);
+            });
+        });
+    </script>
+</body>
+</html>
